@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.ad4m.auto-unlock</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>
+      PASS=$(security find-generic-password -s "ad4m-mcp" -a "passphrase" -w 2>/dev/null);
+      if [ -z "$PASS" ]; then exit 0; fi;
+      curl -s __GQL__ \
+        -H "Content-Type: application/json" \
+        -d "{\"query\":\"mutation { agentUnlock(passphrase: \\\"${PASS}\\\") { isUnlocked } }\"}" \
+        >> __HOME__/.ad4m/auto-unlock.log 2>&1
+    </string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.ad4m/auto-unlock.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.ad4m/auto-unlock.log</string>
+</dict>
+</plist>

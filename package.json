@@ -1,0 +1,19 @@
+{
+  "name": "mcp-ad4m",
+  "version": "2.0.0",
+  "description": "AD4M MCP server for Claude Code — 13-tool semantic memory + enforcement layer",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "typescript": "^6.0.3"
+  }
+}
