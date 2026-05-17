@@ -2,7 +2,7 @@
 /**
  * mcp-ad4m — MCP server wrapping the AD4M local GraphQL API
  *
- * Tools (13):
+ * Tools (14):
  *   ad4m_agent_status        → local agent DID + init state
  *   ad4m_list_perspectives   → all Perspectives on executor
  *   ad4m_create_perspective  → create a named Perspective
@@ -13,6 +13,7 @@
  *   ad4m_config_check        → detect wrong MCP registration file
  *   ad4m_optimize            → audit + deduplicate memory graph
  *   ad4m_stats               → memory graph statistics
+ *   ad4m_traverse            → BFS multi-hop graph traversal — returns connected subgraph
  *   relay_write              → write cross-terminal message via AD4M
  *   ad4m_delete_memory       → remove links by source/predicate/target filter
  *   relay_read               → read cross-terminal messages via AD4M
@@ -69,7 +70,7 @@ const TAXONOMY = {
   ad4m: {
     keywords: ["decision", "project", "fact", "who is", "what was built",
                 "context", "relationship", "remembered", "learned", "history",
-                "zuafrique", "franc", "palm", "aurasci", "agent platform",
+                "zuafrique", "franc", "palm", "agent platform",
                 "mcp", "memory", "semantic", "knows", "completed", "deployed"],
     reason:  "Semantic facts, decisions, and cross-session context belong in AD4M.",
     action:  "Use ad4m_write_memory with an appropriate predicate.",
@@ -106,20 +107,24 @@ function configCheck() {
     return {
       status: "missing",
       detail: "~/.claude.json not found.",
-      fix_command: `claude mcp add -e AD4M_GQL_URL=${AD4M_GQL} ad4m -- ${HOME}/bin/mcp-ad4m`,
+      fix_command: `claude mcp add -s user -e AD4M_GQL_URL=${AD4M_GQL} ad4m -- ${HOME}/bin/mcp-ad4m`,
     };
   }
 
-  // Check correct location: projects[HOME].mcpServers.ad4m
-  const projServers = claude?.projects?.[HOME]?.mcpServers ?? {};
-  if (projServers.ad4m) {
-    return { status: "ok", detail: "ad4m is registered in the correct project-scoped location." };
-  }
-
-  // Check top-level (user-scoped — also valid)
+  // Check user scope (top-level mcpServers — correct)
   const topServers = claude?.mcpServers ?? {};
   if (topServers.ad4m) {
-    return { status: "ok", detail: "ad4m is registered at user scope (top-level)." };
+    return { status: "ok", detail: "ad4m is registered at user scope — loads from any directory." };
+  }
+
+  // Check project scope (loads only from one directory)
+  const projServers = claude?.projects?.[HOME]?.mcpServers ?? {};
+  if (projServers.ad4m) {
+    return {
+      status: "wrong_scope",
+      detail: "ad4m is registered at project scope. It will only load when Claude Code is opened from " + HOME + ". Re-register at user scope to fix silent failures.",
+      fix_command: `claude mcp remove ad4m && claude mcp add -s user -e AD4M_GQL_URL=${AD4M_GQL} ad4m -- ${HOME}/bin/mcp-ad4m`,
+    };
   }
 
   // Check dead-config location
@@ -133,14 +138,14 @@ function configCheck() {
     return {
       status: "wrong_file",
       detail: "ad4m is in ~/.claude/settings.json which Claude Code IGNORES for MCP registration.",
-      fix_command: `claude mcp add -e AD4M_GQL_URL=${AD4M_GQL} ad4m -- ${HOME}/bin/mcp-ad4m`,
+      fix_command: `claude mcp add -s user -e AD4M_GQL_URL=${AD4M_GQL} ad4m -- ${HOME}/bin/mcp-ad4m`,
     };
   }
 
   return {
     status: "missing",
     detail: "ad4m is not registered anywhere Claude Code can find it.",
-    fix_command: `claude mcp add -e AD4M_GQL_URL=${AD4M_GQL} ad4m -- ${HOME}/bin/mcp-ad4m`,
+    fix_command: `claude mcp add -s user -e AD4M_GQL_URL=${AD4M_GQL} ad4m -- ${HOME}/bin/mcp-ad4m`,
   };
 }
 
@@ -260,7 +265,6 @@ async function optimizePerspective(uuid, dryRun = true) {
       } catch { /* skip if removal fails */ }
     }
 
-    // Write optimizer meta-memory
     if (removed > 0) {
       await gql(
         `mutation PerspectiveAddLink($uuid: String!, $link: LinkInput!) {
@@ -324,7 +328,6 @@ async function writeMemory({ perspective_uuid, source, predicate = "ad4m://relat
     { uuid: perspective_uuid, link: { source, predicate, target } }
   );
 
-  // Shared cross-terminal write counter — fires optimize every 10 writes globally
   tickWriteCounter(perspective_uuid).catch(() => {});
 
   return ok(data.perspectiveAddLink);
@@ -404,6 +407,79 @@ async function stats({ perspective_uuid }) {
     by_predicate: byPredicate,
     oldest:     sorted[0]?.timestamp ?? null,
     newest:     sorted[sorted.length - 1]?.timestamp ?? null,
+  });
+}
+
+async function traverse({ perspective_uuid, node, depth = 2 }) {
+  const MAX_DEPTH = Math.min(Math.max(1, depth), 4); // clamp 1–4
+  const visited  = new Set([node]);
+  const allEdges = new Map(); // deduped by source|predicate|target key
+  let   frontier = [node];
+
+  for (let d = 0; d < MAX_DEPTH && frontier.length > 0; d++) {
+    const nextFrontier = [];
+
+    for (const current of frontier) {
+      // Fetch both directions in parallel
+      const [bySource, byTarget] = await Promise.all([
+        gql(
+          `query Q($uuid: String!, $query: LinkQuery!) {
+             perspectiveQueryLinks(uuid: $uuid, query: $query) {
+               author timestamp data { source predicate target }
+             }
+           }`,
+          { uuid: perspective_uuid, query: { source: current } }
+        ),
+        gql(
+          `query Q($uuid: String!, $query: LinkQuery!) {
+             perspectiveQueryLinks(uuid: $uuid, query: $query) {
+               author timestamp data { source predicate target }
+             }
+           }`,
+          { uuid: perspective_uuid, query: { target: current } }
+        ),
+      ]);
+
+      const links = [
+        ...bySource.perspectiveQueryLinks,
+        ...byTarget.perspectiveQueryLinks,
+      ];
+
+      for (const link of links) {
+        const { source, predicate, target } = link.data;
+        const key = `${source}|${predicate}|${target}`;
+        if (!allEdges.has(key)) {
+          allEdges.set(key, { source, predicate, target, timestamp: link.timestamp });
+        }
+        for (const neighbor of [source, target]) {
+          if (!visited.has(neighbor)) {
+            visited.add(neighbor);
+            nextFrontier.push(neighbor);
+          }
+        }
+      }
+    }
+
+    frontier = nextFrontier;
+  }
+
+  const edges = [...allEdges.values()];
+
+  // Group by predicate for LLM readability
+  const byPredicate = {};
+  for (const edge of edges) {
+    if (!byPredicate[edge.predicate]) byPredicate[edge.predicate] = [];
+    byPredicate[edge.predicate].push({ from: edge.source, to: edge.target });
+  }
+
+  return ok({
+    root:         node,
+    depth:        MAX_DEPTH,
+    node_count:   visited.size,
+    edge_count:   edges.length,
+    subgraph:     edges,
+    by_predicate: byPredicate,
+    summary: `${visited.size} connected nodes, ${edges.length} edges — ${MAX_DEPTH}-hop subgraph from ${node}`,
   });
 }
 
@@ -506,7 +582,7 @@ async function relayRead({ perspective_uuid, session_id, since }) {
 // ── MCP server ─────────────────────────────────────────────────────────────
 
 const server = new Server(
-  { name: "mcp-ad4m", version: "2.0.0" },
+  { name: "mcp-ad4m", version: "2.1.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -542,7 +618,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           perspective_uuid: { type: "string", description: "Target Perspective UUID" },
           source:           { type: "string", description: "Source URI (e.g. 'agent://session/2026-03-22')" },
           predicate:        { type: "string", description: "Predicate URI (e.g. 'ad4m://knows', 'franc://holds')" },
-          target:           { type: "string", description: "Target URI or literal (e.g. 'literal://FRANC token graduated')" },
+          target:           { type: "string", description: "Target URI or literal (e.g. 'literal://decision text')" },
         },
         required: ["perspective_uuid", "source", "target"],
       },
@@ -585,7 +661,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "ad4m_config_check",
-      description: "Check whether the mcp-ad4m server is registered in the correct config file (~/.claude.json, not the dead ~/.claude/settings.json). Run at session start to detect misconfiguration before it causes silent failures.",
+      description: "Check whether the mcp-ad4m server is registered at user scope in ~/.claude.json. Detects project-scope and wrong-file registrations that cause silent failures. Run at session start to verify correct setup.",
       inputSchema: { type: "object", properties: {} },
     },
     {
@@ -609,6 +685,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           perspective_uuid: { type: "string", description: "Perspective UUID to inspect" },
         },
         required: ["perspective_uuid"],
+      },
+    },
+    {
+      name: "ad4m_traverse",
+      description: "Multi-hop graph traversal starting from a node URI. Follows all links where the node appears as source or target, expanding outward to the given depth (default 2, max 4). Returns the full connected subgraph — nodes, edges, and edges grouped by predicate — so Claude can reason over connected facts without requiring formal logic.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          perspective_uuid: { type: "string", description: "Perspective UUID to traverse" },
+          node:             { type: "string", description: "Starting node URI (e.g. 'memory://feedback/feedback_cloudflare_d1_builds')" },
+          depth:            { type: "number", description: "Traversal depth — 1 to 4 hops (default: 2)" },
+        },
+        required: ["perspective_uuid", "node"],
       },
     },
     {
@@ -668,7 +757,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case "ad4m_config_check":       return { content: await runConfigCheck() };
       case "ad4m_optimize":           return { content: await optimize(args) };
       case "ad4m_stats":              return { content: await stats(args) };
-      case "ad4m_delete_memory":       return { content: await deleteMemory(args) };
+      case "ad4m_traverse":           return { content: await traverse(args) };
+      case "ad4m_delete_memory":      return { content: await deleteMemory(args) };
       case "relay_write":             return { content: await relayWrite(args) };
       case "relay_read":              return { content: await relayRead(args) };
       default:
