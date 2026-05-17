@@ -1,6 +1,6 @@
 # mcp-ad4m
 
-AD4M MCP server for Claude Code — 13-tool semantic memory and enforcement layer.
+AD4M MCP server for Claude Code — 14-tool semantic memory and enforcement layer.
 
 Gives Claude Code persistent memory, cross-session context, and memory hygiene via a locally hosted [AD4M](https://ad4m.dev) executor. All data stays on your machine.
 
@@ -28,7 +28,7 @@ cd mcp-ad4m
 ```
 
 The script:
-- Builds the TypeScript server
+- Installs dependencies
 - Stores your passphrase in macOS Keychain (not plaintext)
 - Installs a `launchd` job that auto-unlocks AD4M on every boot
 - Creates a `ClaudeMemory` Perspective and saves the UUID
@@ -38,7 +38,7 @@ The script:
 
 ---
 
-## Tools (13)
+## Tools (14)
 
 | Tool | Description |
 |------|-------------|
@@ -49,9 +49,10 @@ The script:
 | `ad4m_recall` | Query links with optional source/predicate/target filters |
 | `ad4m_delete_memory` | Remove links by filter — matched/removed/failed counts |
 | `ad4m_classify` | Classify content by layer before writing (env/local/relay/ad4m) |
-| `ad4m_config_check` | Detect MCP registration in the wrong config file |
+| `ad4m_config_check` | Detect MCP registration in the wrong config file or scope |
 | `ad4m_optimize` | Deduplicate graph, flag stale entries, auto-runs every 10 writes |
 | `ad4m_stats` | Total links, duplicate count, breakdown by predicate |
+| `ad4m_traverse` | BFS multi-hop graph traversal — returns connected subgraph |
 | `ad4m_get_neighbourhood` | Inspect a shared AD4M Neighbourhood |
 | `relay_write` | Write cross-terminal live state via AD4M |
 | `relay_read` | Read cross-terminal relay messages |
@@ -78,6 +79,44 @@ franc://relay/terminal-a    →  franc://relay        →  literal://Build in pr
 | `relay` | AD4M relay predicate | Live cross-terminal state |
 
 Run `ad4m_classify` before `ad4m_write_memory` if unsure which layer to use.
+
+---
+
+## Graph Traversal and Reasoning
+
+`ad4m_traverse` exposes the semantic graph structure so Claude can reason over connected facts — not just retrieve individual entries.
+
+**How it works:** Given a starting node URI, it runs a bidirectional BFS, following all links where the node appears as source or target. It expands outward hop by hop up to the requested depth, deduplicates edges, and returns the full subgraph grouped by predicate.
+
+```
+ad4m_traverse({
+  perspective_uuid: "...",
+  node: "memory://feedback/feedback_cloudflare_d1_builds",
+  depth: 2
+})
+```
+
+**Returns:**
+```json
+{
+  "root": "memory://feedback/feedback_cloudflare_d1_builds",
+  "depth": 2,
+  "node_count": 3,
+  "edge_count": 2,
+  "by_predicate": {
+    "ad4m://has-name": [{ "from": "memory://...", "to": "literal://Cloudflare Worker + D1 build patterns" }],
+    "ad4m://has-content": [{ "from": "memory://...", "to": "literal://Always use prepare().run()..." }]
+  },
+  "summary": "3 connected nodes, 2 edges — 2-hop subgraph"
+}
+```
+
+**Why this matters:** `ad4m_recall` retrieves flat matches. `ad4m_traverse` returns the connected graph — Claude reads the full subgraph in one call and can derive conclusions, spot conflicts, and surface implications from graph structure alone. No formal logic engine required.
+
+**Depth guidance:**
+- `depth: 1` — direct neighbors only (fast)
+- `depth: 2` — default, covers most use cases
+- `depth: 3–4` — broad context retrieval (more queries, richer output)
 
 ---
 
@@ -186,7 +225,8 @@ The server returns actionable errors:
 
 ```
 mcp-ad4m/
-├── index.js              MCP server (13 tools, runs directly with Node)
+├── index.js              MCP server (14 tools, runs directly with Node)
+├── dist/                 Runtime copy (used by wrapper binary)
 ├── launchd/
 │   └── dev.ad4m.auto-unlock.plist
 ├── setup-claude-code.sh  One-command setup
